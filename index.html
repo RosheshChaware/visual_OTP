@@ -1,0 +1,281 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>Squat + Finger-OTP Verification (Fixed Instant Speech)</title>
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/p5.js/1.6.0/p5.min.js"></script>
+
+  <!-- MediaPipe Hands -->
+  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/drawing_utils/drawing_utils.js"></script>
+
+  <style>
+    body { margin: 0; font-family: Arial, sans-serif; background: #0f172a; color: #e6eef8; }
+    #controls { position: absolute; left: 16px; top: 16px; z-index: 50; }
+    button { padding: 8px 12px; margin-right:8px; border-radius:8px; border: none; cursor: pointer; }
+    .btn-primary { background:#06b6d4; color:#04203b; font-weight:700; }
+    .btn-secondary { background:#94a3b8; color:#031024; }
+    #status { margin-top:8px; font-size:14px }
+    canvas { display: block; margin: auto; }
+    .otp-box { position:absolute; right:16px; top:16px; background:rgba(0,0,0,0.45); padding:12px 16px; border-radius:10px; }
+    .otp-digit { display:inline-block; width:36px; height:36px; line-height:36px; text-align:center; margin:4px; border-radius:6px; background:#1e293b; font-weight:700; font-size:18px; }
+    .otp-current { box-shadow: 0 0 0 3px rgba(34,197,94,0.16); background:#065f46; color: #c7f9e5; }
+    .verified-badge { display:inline-block; padding:6px 10px; background:#059669; color:white; border-radius:8px; font-weight:700; margin-left:8px; }
+  </style>
+</head>
+<body>
+
+<div id="controls">
+  <button id="startVerBtn" class="btn-primary">Start Verification</button>
+  <button id="resetVerBtn" class="btn-secondary">Reset</button>
+  <div id="status">Status: Idle</div>
+</div>
+
+<div class="otp-box" id="otpBox">
+  <div>Verification sequence:</div>
+  <div id="otpDigits" style="margin-top:8px;"></div>
+  <div id="verificationResult" style="margin-top:8px;"></div>
+</div>
+
+<script>
+/* ---------------------------   Vars ----------------------------*/
+let video;
+let lastHandLandmarks = null;
+let hands, cameraUtils;
+
+let sequence = [];
+let currentIndex = 0;
+let verified = false;
+
+let countBuffer = [];
+const BUFFER_LEN = 10;
+const ACCEPT_FREQ = 6;
+
+let graceUntil = 0;
+const DIGIT_GRACE_MS = 700;
+
+/* ---------------------------   p5.js setup ----------------------------*/
+function setup() {
+  createCanvas(640, 480);
+  video = createCapture(VIDEO, () => {});
+  video.size(640, 480);
+  video.hide();
+
+  // init MediaPipe Hands
+  hands = new Hands({
+    locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}`
+  });
+  hands.setOptions({
+    maxNumHands: 1,
+    modelComplexity: 1,
+    minDetectionConfidence: 0.6,
+    minTrackingConfidence: 0.6
+  });
+  hands.onResults(onHandsResults);
+
+  // camera utils
+  cameraUtils = new Camera(video.elt, {
+    onFrame: async () => { await hands.send({ image: video.elt }); },
+    width: 640,
+    height: 480
+  });
+  cameraUtils.start();
+
+  // Buttons
+  document.getElementById('startVerBtn').addEventListener('click', startVerification);
+  document.getElementById('resetVerBtn').addEventListener('click', resetVerification);
+  updateStatus('Idle');
+}
+
+/* ---------------------------   p5 draw ----------------------------*/
+function draw() {
+  background(30);
+
+  // mirror video
+  push();
+  translate(width, 0);
+  scale(-1, 1);
+  image(video, 0, 0, width, height);
+  pop();
+
+  // draw landmarks
+  if (lastHandLandmarks) {
+    push();
+    translate(width, 0);
+    scale(-1, 1);
+    stroke(0,255,150);
+    strokeWeight(2);
+    noFill();
+    for (let lm of lastHandLandmarks) {
+      fill(255);
+      circle(lm.x * width, lm.y * height, 8);
+    }
+    pop();
+  }
+}
+
+/* ---------------------------   MediaPipe callback ----------------------------*/
+function onHandsResults(results) {
+  if (results.multiHandLandmarks && results.multiHandLandmarks.length > 0) {
+    lastHandLandmarks = results.multiHandLandmarks[0].map(p => ({ x: p.x, y: p.y, z: p.z }));
+  } else {
+    lastHandLandmarks = null;
+    countBuffer = [];
+  }
+
+  if (!verified && sequence.length > 0 && lastHandLandmarks) {
+    const detected = countFingersImproved(lastHandLandmarks);
+    countBuffer.push(detected);
+    if (countBuffer.length > BUFFER_LEN) countBuffer.shift();
+
+    const { mode, freq } = getMode(countBuffer);
+    updateStatus(`Detecting: ${mode} (seen ${freq}/${BUFFER_LEN}). Expect ${sequence[currentIndex]}`);
+    checkVerificationCount(mode, freq);
+  } else if (!lastHandLandmarks && sequence.length > 0 && !verified) {
+    updateStatus('Show hand to verify');
+  }
+}
+
+/* ---------------------------   Finger counting ----------------------------*/
+function countFingersImproved(landmarks) {
+  if (!landmarks || landmarks.length < 21) return 0;
+  const wrist = landmarks[0];
+  const dist = (a, b) => Math.hypot(a.x - b.x, a.y - b.y);
+
+  let fingersUp = 0;
+  const Y_THRESH = 0.025;
+  const DIST_THRESH = 0.025;
+
+  function isFingerUp(tipIdx, pipIdx) {
+    const tip = landmarks[tipIdx], pip = landmarks[pipIdx];
+    if (!tip || !pip) return false;
+    if ((pip.y - tip.y) > Y_THRESH) return true;
+    if (dist(tip, wrist) > dist(pip, wrist) + DIST_THRESH) return true;
+    return false;
+  }
+
+  if (isFingerUp(8, 6)) fingersUp++;    // index
+  if (isFingerUp(12, 10)) fingersUp++;  // middle
+  if (isFingerUp(16, 14)) fingersUp++;  // ring
+  if (isFingerUp(20, 18)) fingersUp++;  // pinky
+
+  const thumbTip = landmarks[4], thumbIp = landmarks[3];
+  if (thumbTip && thumbIp) {
+    if (dist(thumbTip, wrist) > dist(thumbIp, wrist) + 0.03) fingersUp++;
+  }
+
+  return Math.min(Math.max(fingersUp, 0), 5);
+}
+
+/* ---------------------------   Mode helper ----------------------------*/
+function getMode(arr) {
+  if (!arr || arr.length === 0) return { mode: null, freq: 0 };
+  const counts = {};
+  let mode = null, freq = 0;
+  for (const x of arr) {
+    counts[x] = (counts[x] || 0) + 1;
+    if (counts[x] > freq) { freq = counts[x]; mode = x; }
+  }
+  return { mode, freq };
+}
+
+/* ---------------------------   Verification ----------------------------*/
+function startVerification() {
+  sequence = [];
+  for (let i = 0; i < 5; i++) sequence.push(Math.floor(Math.random() * 5) + 1);
+  currentIndex = 0;
+  verified = false;
+  countBuffer = [];
+  graceUntil = Date.now() + DIGIT_GRACE_MS;
+  renderOtpDigits();
+  updateStatus('Verification started — show fingers for digit 1');
+  speak('Verification started. Show fingers for the first number.');
+  document.getElementById('verificationResult').innerHTML = '';
+}
+
+function resetVerification() {
+  sequence = [];
+  currentIndex = 0;
+  verified = false;
+  countBuffer = [];
+  graceUntil = 0;
+  document.getElementById('otpDigits').innerHTML = '';
+  document.getElementById('verificationResult').innerHTML = '';
+  updateStatus('Idle');
+  speak('Reset complete');
+}
+
+function renderOtpDigits() {
+  const container = document.getElementById('otpDigits');
+  container.innerHTML = '';
+  sequence.forEach((d, idx) => {
+    const el = document.createElement('div');
+    el.className = 'otp-digit' + (idx === currentIndex ? ' otp-current' : '');
+    el.innerText = d;
+    container.appendChild(el);
+  });
+  document.getElementById('verificationResult').innerHTML = '';
+}
+
+function markCurrentCorrect() {
+  const digs = document.querySelectorAll('#otpDigits .otp-digit');
+  if (digs[currentIndex]) {
+    digs[currentIndex].style.background = '#064e3b';
+    digs[currentIndex].style.color = '#c7f9e5';
+  }
+}
+
+function onVerified() {
+  updateStatus('Verified ✅');
+  document.getElementById('verificationResult').innerHTML = '<span class="verified-badge">VERIFIED</span>';
+  speak('Verification successful');
+}
+
+/* --- core check (instant Wrong speech) --- */
+function checkVerificationCount(modeCount, freq) {
+  if (sequence.length === 0 || verified) return;
+  const expected = sequence[currentIndex];
+
+  if (Date.now() < graceUntil) return;
+
+  if (freq >= ACCEPT_FREQ) {
+    if (modeCount === expected) {
+      markCurrentCorrect();
+      speak('Correct');
+      currentIndex++;
+      countBuffer = [];
+      renderOtpDigits();
+      graceUntil = Date.now() + DIGIT_GRACE_MS;
+      if (currentIndex >= sequence.length) {
+        verified = true;
+        onVerified();
+      } else {
+        updateStatus(`Good — now show fingers for digit ${currentIndex + 1}`);
+        speak(`Now show fingers for digit ${currentIndex + 1}`);
+      }
+    } else {
+      // ✅ Wrong speech instantly
+      updateStatus(`Wrong: showed ${modeCount}, expected ${expected} — try again`);
+      speak('wrong, try again');
+      countBuffer = [];
+      graceUntil = Date.now() + 400;
+    }
+  }
+}
+
+/* ---------------------------   Helpers ----------------------------*/
+function speak(text) {
+  try {
+    const msg = new SpeechSynthesisUtterance(text);
+    window.speechSynthesis.speak(msg);
+  } catch (e) {}
+}
+
+function updateStatus(txt) {
+  document.getElementById('status').innerText = 'Status: ' + txt;
+}
+</script>
+</body>
+</html>

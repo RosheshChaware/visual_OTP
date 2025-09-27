@@ -1,14 +1,18 @@
 <!doctype html>
+
 <html lang="en">
 <head>
   <meta charset="utf-8" />
-  <title>Squat + Finger-OTP Verification (Fixed Instant Speech)</title>
+  <title>Squat + Finger-OTP Verification (No Voice)</title>
   <meta name="viewport" content="width=device-width,initial-scale=1" />
   <script src="https://cdnjs.cloudflare.com/ajax/libs/p5.js/1.6.0/p5.min.js"></script>
 
   <!-- MediaPipe Hands -->
+
   <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js"></script>
+
   <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js"></script>
+
   <script src="https://cdn.jsdelivr.net/npm/@mediapipe/drawing_utils/drawing_utils.js"></script>
 
   <style>
@@ -24,6 +28,7 @@
     .otp-current { box-shadow: 0 0 0 3px rgba(34,197,94,0.16); background:#065f46; color: #c7f9e5; }
     .verified-badge { display:inline-block; padding:6px 10px; background:#059669; color:white; border-radius:8px; font-weight:700; margin-left:8px; }
   </style>
+
 </head>
 <body>
 
@@ -191,7 +196,6 @@ function startVerification() {
   graceUntil = Date.now() + DIGIT_GRACE_MS;
   renderOtpDigits();
   updateStatus('Verification started — show fingers for digit 1');
-  speak('Verification started. Show fingers for the first number.');
   document.getElementById('verificationResult').innerHTML = '';
 }
 
@@ -204,7 +208,6 @@ function resetVerification() {
   document.getElementById('otpDigits').innerHTML = '';
   document.getElementById('verificationResult').innerHTML = '';
   updateStatus('Idle');
-  speak('Reset complete');
 }
 
 function renderOtpDigits() {
@@ -230,10 +233,9 @@ function markCurrentCorrect() {
 function onVerified() {
   updateStatus('Verified ✅');
   document.getElementById('verificationResult').innerHTML = '<span class="verified-badge">VERIFIED</span>';
-  speak('Verification successful');
 }
 
-/* --- core check (instant Wrong speech) --- */
+/* --- core check (instant Wrong) --- */
 function checkVerificationCount(modeCount, freq) {
   if (sequence.length === 0 || verified) return;
   const expected = sequence[currentIndex];
@@ -243,7 +245,6 @@ function checkVerificationCount(modeCount, freq) {
   if (freq >= ACCEPT_FREQ) {
     if (modeCount === expected) {
       markCurrentCorrect();
-      speak('Correct');
       currentIndex++;
       countBuffer = [];
       renderOtpDigits();
@@ -253,12 +254,9 @@ function checkVerificationCount(modeCount, freq) {
         onVerified();
       } else {
         updateStatus(`Good — now show fingers for digit ${currentIndex + 1}`);
-        speak(`Now show fingers for digit ${currentIndex + 1}`);
       }
     } else {
-      // ✅ Wrong speech instantly
       updateStatus(`Wrong: showed ${modeCount}, expected ${expected} — try again`);
-      speak('wrong, try again');
       countBuffer = [];
       graceUntil = Date.now() + 400;
     }
@@ -266,16 +264,10 @@ function checkVerificationCount(modeCount, freq) {
 }
 
 /* ---------------------------   Helpers ----------------------------*/
-function speak(text) {
-  try {
-    const msg = new SpeechSynthesisUtterance(text);
-    window.speechSynthesis.speak(msg);
-  } catch (e) {}
-}
-
 function updateStatus(txt) {
   document.getElementById('status').innerText = 'Status: ' + txt;
 }
 </script>
+
 </body>
 </html>
